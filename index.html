@@ -1266,7 +1266,21 @@
 
       <!-- Tabla registros -->
       <div class="card">
-        <div class="table-wrap">
+        <!-- Leyenda de colores -->
+      <div style="display:flex;align-items:center;gap:16px;padding:10px 18px 0;flex-wrap:wrap;">
+        <span style="font-size:.68rem;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--text-muted);">Leyenda:</span>
+        <span style="display:flex;align-items:center;gap:5px;font-size:.72rem;color:var(--text-secondary);">
+          <span style="width:10px;height:10px;border-radius:2px;background:var(--ok);display:inline-block;"></span> Verificado (sin novedades)
+        </span>
+        <span style="display:flex;align-items:center;gap:5px;font-size:.72rem;color:var(--text-secondary);">
+          <span style="width:10px;height:10px;border-radius:2px;background:var(--amber);display:inline-block;"></span> Novedad menor (sin lugar)
+        </span>
+        <span style="display:flex;align-items:center;gap:5px;font-size:.72rem;color:var(--text-secondary);">
+          <span style="width:10px;height:10px;border-radius:2px;background:var(--error);display:inline-block;"></span> Novedad crítica (irreal / proveedor)
+        </span>
+        <span style="margin-left:auto;font-size:.68rem;color:var(--text-muted);font-style:italic;">Pasa el cursor sobre los badges para ver el detalle</span>
+      </div>
+      <div class="table-wrap">
           <table id="tablaHistorial" aria-label="Registros de ingreso de madera">
             <thead>
               <tr>
@@ -1561,14 +1575,12 @@
    * }}
    */
   function calcularBalsa(volGuia, bfNetos, bfCalificados) {
-    // --- Resultado base (estado de error) ---
     const FALLO = (msg) => ({
       ok: false, error: msg,
       desperdicio: 0, yield: 0,
       tieneNovedad: false, deltaVol: 0, deltaPct: 0,
     });
 
-    // --- 2.1 Parseo y validación de tipos ---
     const vG  = parseFloat(volGuia);
     const bfN = parseFloat(bfNetos);
     const bfC = parseFloat(bfCalificados);
@@ -1576,32 +1588,19 @@
     if (isNaN(vG)  || vG  < 0) return FALLO('Vol. Guía debe ser un número positivo.');
     if (isNaN(bfN) || bfN < 0) return FALLO('BF Netos debe ser un número positivo.');
     if (isNaN(bfC) || bfC < 0) return FALLO('BF Calificados debe ser un número positivo.');
+    // SIN restricción bfC > bfN — se permite y se registra como novedad IRREAL
 
-    // --- 2.2 Validaciones de negocio ---
-    if (bfC > bfN) return FALLO('BF Calificados no puede superar BF Netos.');
-
-    // --- 2.3 Cálculos ---
-    const desperdicio = bfN - bfC;                         // BF perdidos en clasificación
-    const yieldPct    = bfN > 0                            // Rendimiento sobre lo recibido
-      ? parseFloat(((bfC / bfN) * 100).toFixed(2))
-      : 0;
-    const deltaVol    = parseFloat((vG - bfN).toFixed(2)); // Diferencia guía vs físico
-    const deltaPct    = vG > 0
-      ? parseFloat((Math.abs(deltaVol) / vG * 100).toFixed(2))
-      : 0;
-
-    // --- 2.4 Detección de Novedad en Volumen ---
-    // Regla EUDR: cualquier diferencia entre volumen documentado y físico se registra.
-    const tieneNovedad = vG !== bfN;
+    const desperdicio = Math.max(0, bfN - bfC);
+    const yieldPct    = bfN > 0 ? parseFloat(((bfC / bfN) * 100).toFixed(2)) : 0;
+    const deltaVol    = parseFloat((vG - bfN).toFixed(2));
+    const deltaPct    = vG > 0 ? parseFloat((Math.abs(deltaVol) / vG * 100).toFixed(2)) : 0;
+    const tieneNovedad = Math.abs(vG - bfN) > 0.01;
 
     return {
-      ok:           true,
-      error:        null,
-      desperdicio:  parseFloat(desperdicio.toFixed(2)),
-      yield:        yieldPct,
-      tieneNovedad,
-      deltaVol,
-      deltaPct,
+      ok: true, error: null,
+      desperdicio: parseFloat(desperdicio.toFixed(2)),
+      yield: yieldPct,
+      tieneNovedad, deltaVol, deltaPct,
     };
   }
 
@@ -1658,7 +1657,7 @@
       const raw = localStorage.getItem(STORE_KEY);
       registros = raw ? JSON.parse(raw) : [];
     } catch (e) {
-      console.warn('[BALSASUD] Error cargando store:', e);
+      if (typeof console !== 'undefined' && console.warn) console.warn('[BALSASUD] Error cargando store:', e);
       registros = [];
     }
   }
@@ -1667,7 +1666,7 @@
     try {
       localStorage.setItem(STORE_KEY, JSON.stringify(registros));
     } catch (e) {
-      console.warn('[BALSASUD] Error guardando store:', e);
+      if (typeof console !== 'undefined' && console.warn) console.warn('[BALSASUD] Error guardando store:', e);
     }
   }
 
@@ -1811,44 +1810,70 @@
       const volG    = r.volGuia || bfN;
       const desp    = r.desperdicio != null ? r.desperdicio : Math.max(0, bfN - bfC);
 
-      // ── ALERTAS CON TOOLTIP ───────────────────────────────
-      const alertas = [];
+      // ── INDICADOR DE COLOR (cuadrito) + BADGES con tooltip ─
+      const novsArr  = Array.isArray(r.novedades) ? r.novedades : [];
+      const isVerif  = r.verificado !== false; // true por defecto si BF Cal ≤ BF Netos
 
-      // IRREAL: BF Calificados > Volumen Guía
-      if (bfC > volG && volG > 0) {
-        alertas.push(`<span class="tooltip-wrap">
-          <span class="alert-badge alert-badge--irreal">⛔ IRREAL</span>
-          <span class="tooltip-box">BF Calificados (${bfC}) superan el Volumen BF de la Guía (${volG.toFixed(2)}). Diferencia: +${(bfC-volG).toFixed(2)} BF.<br>Físicamente imposible — revisar.</span>
+      // Determinar color del cuadrito inicial de la fila
+      let cuadritoColor, cuadritoTitle;
+      if (novsArr.some(n => n.tipo === 'IRREAL' || n.tipo === 'PROV_DESCONOCIDO')) {
+        cuadritoColor = 'var(--error)';
+        cuadritoTitle = 'Novedad crítica';
+      } else if (novsArr.some(n => n.tipo === 'SIN_LUGAR')) {
+        cuadritoColor = 'var(--amber)';
+        cuadritoTitle = 'Novedad menor';
+      } else if (isVerif && novsArr.length === 0) {
+        cuadritoColor = 'var(--ok)';
+        cuadritoTitle = 'Verificado — sin novedades';
+      } else {
+        cuadritoColor = 'var(--ok)';
+        cuadritoTitle = 'Sin novedades';
+      }
+
+      const cuadrito = `<span title="${cuadritoTitle}" style="display:inline-block;width:10px;height:10px;border-radius:2px;background:${cuadritoColor};flex-shrink:0;margin-right:2px;"></span>`;
+
+      // Construir badges para la columna de Estado/Alertas
+      let estadoBadges = [];
+
+      if (novsArr.length > 0) {
+        // Badge compacto que agrupa todas las novedades — tooltip muestra el detalle de cada una
+        const tooltipLines = novsArr.map(n => `<strong>${n.icono} ${n.titulo}</strong><br>${escHtml(n.detalle)}`).join('<hr style="border-color:rgba(255,255,255,.2);margin:5px 0;">');
+        const labelBadge   = novsArr.length === 1
+          ? `${novsArr[0].icono} ${novsArr[0].titulo}`
+          : `${novsArr[0].icono} ${novsArr.length} Novedades`;
+        const badgeCls     = novsArr.some(n => n.tipo === 'IRREAL' || n.tipo === 'PROV_DESCONOCIDO')
+          ? 'alert-badge--irreal'
+          : 'alert-badge--novedad';
+
+        estadoBadges.push(`<span class="tooltip-wrap">
+          <span class="alert-badge ${badgeCls}" style="cursor:help;">${labelBadge}</span>
+          <span class="tooltip-box" style="width:260px;">${tooltipLines}</span>
+        </span>`);
+
+        // Badge secundario "Verificado" si además tiene BF Cal ≤ BF Netos (proceso normal)
+        if (isVerif && !novsArr.some(n => n.tipo === 'IRREAL')) {
+          estadoBadges.push(`<span class="tooltip-wrap">
+            <span class="alert-badge alert-badge--ok" style="font-size:.62rem;">✓ Vol.OK</span>
+            <span class="tooltip-box">Volumen verificado: BF Calificados (${bfC}) ≤ BF Netos (${bfN}). Proceso de calificación normal.</span>
+          </span>`);
+        }
+      } else {
+        // Sin novedades — mostrar Verificado
+        estadoBadges.push(`<span class="tooltip-wrap">
+          <span class="alert-badge alert-badge--ok" style="cursor:help;">✓ Verificado</span>
+          <span class="tooltip-box">Sin novedades.<br>BF Netos: ${bfN} | BF Calificados: ${bfC}<br>Volumen dentro del rango normal.</span>
         </span>`);
       }
 
-      // NOVEDAD: BF Netos ≠ BF Calificados (diferencia significativa)
-      if (r.tieneNovedad && !(bfC > volG && volG > 0)) {
-        const diff = Math.abs(bfN - bfC).toFixed(2);
-        const pct  = bfN > 0 ? ((Math.abs(bfN-bfC)/bfN)*100).toFixed(1) : 0;
-        alertas.push(`<span class="tooltip-wrap">
-          <span class="alert-badge alert-badge--novedad">⚠ Novedad</span>
-          <span class="tooltip-box">
-            <strong>Novedad en Volumen</strong><br>
-            BF Netos: ${bfN}<br>
-            BF Calificados: ${bfC}<br>
-            Diferencia: ${diff} BF (${pct}%)<br>
-            <em>Normal en proceso de calificación.</em>
-          </span>
-        </span>`);
-      }
-
-      if (!alertas.length) {
-        alertas.push(`<span class="alert-badge alert-badge--ok">✓ OK</span>`);
-      }
-
-      const rowClass = (bfC > volG && volG > 0) ? 'row--irreal' : r.tieneNovedad ? 'row--novedad' : '';
+      // Clase de fila
+      const tieneIrreal = novsArr.some(n => n.tipo === 'IRREAL' || n.tipo === 'PROV_DESCONOCIDO');
+      const rowClass    = tieneIrreal ? 'row--irreal' : novsArr.length > 0 ? 'row--novedad' : '';
 
       const btnEdit   = `<button class="btn btn--ghost btn--sm" onclick="abrirEditReg('${r.id}')" title="Editar">✏</button>`;
       const btnBorrar = `<button class="btn btn--danger btn--sm" onclick="abrirModalEliminar('${escHtml(r.id)}','${escHtml(r.numGuia)}')" title="Eliminar">🗑</button>`;
 
       return `<tr class="${rowClass}">
-        <td style="font-weight:600;">${escHtml(r.numGuia)}</td>
+        <td style="font-weight:600;display:flex;align-items:center;gap:5px;">${cuadrito}${escHtml(r.numGuia)}</td>
         <td><span class="badge badge--navy" style="font-size:.65rem">${escHtml(r.tipoGuia)}</span></td>
         <td>${escHtml(r.proveedorNombre)}</td>
         <td style="font-size:.82rem;color:var(--text-muted);">${escHtml(r.lugarProcedencia||'—')}</td>
@@ -1860,7 +1885,7 @@
         <td style="color:${desp>0?'var(--error)':'var(--ok)'};font-weight:600;">${desp}</td>
         <td>${r.yield}%</td>
         <td><span class="badge badge--navy" style="font-size:.65rem;background:rgba(29,58,122,.08);color:var(--navy);">${escHtml(r.calidad||'—')}</span></td>
-        <td style="white-space:nowrap;">${alertas.join(' ')}</td>
+        <td style="white-space:nowrap;min-width:110px;">${estadoBadges.join('<br>')}</td>
         <td style="white-space:nowrap;display:flex;gap:4px;">${btnEdit}${btnBorrar}</td>
       </tr>`;
     }).join('');
@@ -1880,7 +1905,7 @@
     const bfCalif = d.reduce((a,r)=>a+(r.bfCalificados||0),0);
     const desp    = d.reduce((a,r)=>a+Math.max(0,(r.bfNetos||0)-(r.bfCalificados||0)),0);
     const estBloq = d.reduce((a,r)=>a+(r.estBloques||(r.bfCalificados||0)*0.82),0);
-    const nov     = d.filter(r=>r.tieneNovedad).length;
+    const nov     = d.filter(r => r.tieneNovedad && Array.isArray(r.novedades) && r.novedades.length > 0).length;
     const yieldG  = bfNetos>0 ? (bfCalif/bfNetos*100) : 0;
 
     const el=(id,v)=>{const e=document.getElementById(id);if(e)e.textContent=v;};
@@ -2146,12 +2171,10 @@
     const m3Val    = parseFloat(document.getElementById('inpVolM3').value) || 0;
     const bfCalVal = parseFloat(document.getElementById('inpBFCalif').value) || 0;
 
-    // BF Netos (Guía) = m³ × 424
-    const bfNetos = m3Val > 0 ? parseFloat((m3Val * 424).toFixed(2)) : 0;
-    document.getElementById('inpVolGuia').value = bfNetos > 0 ? bfNetos : '';
-
-    // Estimado Neto en Bloques = BF Calificados × 0.82
+    const bfNetos    = m3Val > 0 ? parseFloat((m3Val * 424).toFixed(2)) : 0;
     const estBloques = bfCalVal > 0 ? parseFloat((bfCalVal * 0.82).toFixed(2)) : 0;
+
+    document.getElementById('inpVolGuia').value    = bfNetos > 0 ? bfNetos : '';
     document.getElementById('inpEstBloques').value = estBloques > 0 ? estBloques : '';
 
     const res = document.getElementById('calcResult');
@@ -2162,14 +2185,20 @@
     document.getElementById('crDesperdicio').textContent = desp.toFixed(2) + ' BF';
     document.getElementById('crYield').textContent = bfNetos > 0 ? ((bfCalVal / bfNetos) * 100).toFixed(2) + '%' : '—';
 
-    // Solo alertar si BF Calificados > BF Netos (IRREAL)
-    const esIrreal = bfCalVal > 0 && bfNetos > 0 && bfCalVal > bfNetos;
+    // Indicador de estado en tiempo real (solo informativo, no bloquea)
+    const esIrreal  = bfCalVal > 0 && bfNetos > 0 && bfCalVal > bfNetos;
+    const esNormal  = bfCalVal > 0 && bfNetos > 0 && bfCalVal <= bfNetos;
+    const crEstado  = document.getElementById('crEstado');
+
     if (esIrreal) {
-      document.getElementById('crEstado').textContent = '⛔ IRREAL';
-      document.getElementById('crEstado').style.color = 'var(--error)';
+      crEstado.textContent = '⛔ Irreal — se registrará con novedad';
+      crEstado.style.color = 'var(--error)';
+    } else if (esNormal) {
+      crEstado.textContent = '✓ Verificado';
+      crEstado.style.color = 'var(--ok)';
     } else {
-      document.getElementById('crEstado').textContent = '✓ OK';
-      document.getElementById('crEstado').style.color = 'var(--ok)';
+      crEstado.textContent = '—';
+      crEstado.style.color = 'var(--text-muted)';
     }
   }
 
@@ -2198,23 +2227,57 @@
     const bfCalVal = parseFloat(bfCalificados || '0');
     const estBloq  = parseFloat((bfCalVal * 0.82).toFixed(2));
 
-    // BLOQUEO: BF Calificados > BF Netos de la guía es físicamente imposible
-    if (bfCalVal > bfNetos && bfNetos > 0) {
-      alert('⛔ VOLUMEN IRREAL\n\nLos BF Calificados (' + bfCalVal + ') superan el Volumen BF de la Guía (' + bfNetos + ').\nEsto es físicamente imposible. Corrige los datos antes de guardar.');
-      return;
+    // ── DETECTAR NOVEDADES — se registran, NUNCA bloquean el guardado ──────
+    const novedades = [];
+
+    // 1. VOLUMEN IRREAL: BF Calificados > BF Netos — esto SÍ es un problema real
+    if (bfCalVal > 0 && bfNetos > 0 && bfCalVal > bfNetos) {
+      novedades.push({
+        tipo:    'IRREAL',
+        icono:   '⛔',
+        titulo:  'Volumen Irreal',
+        color:   'rojo',
+        detalle: `BF Calificados (${bfCalVal}) superan los BF Netos de la guía (${bfNetos}). Diferencia: +${(bfCalVal - bfNetos).toFixed(2)} BF. Requiere revisión urgente.`,
+      });
     }
 
-    const calc = calcularBalsa(bfNetos, bfCalVal, bfCalVal);
-    if (!calc.ok) { alert('Error de cálculo: ' + calc.error); return; }
-
+    // 2. PROVEEDOR DESCONOCIDO — código no existe en el catálogo
     const prov = proveedoresDB[provCodigo] || DB_PROVEEDORES[provCodigo];
+    if (!prov) {
+      novedades.push({
+        tipo:    'PROV_DESCONOCIDO',
+        icono:   '❓',
+        titulo:  'Proveedor Desconocido',
+        color:   'rojo',
+        detalle: `El código "${provCodigo}" no se encontró en el catálogo EUDR (PMV001–PMV027). Verificar antes de procesar el pago.`,
+      });
+    }
+
+    // 3. SIN LUGAR DE PROCEDENCIA — campo vacío
+    if (!lugarProcedencia) {
+      novedades.push({
+        tipo:    'SIN_LUGAR',
+        icono:   '📍',
+        titulo:  'Sin Lugar de Procedencia',
+        color:   'amarillo',
+        detalle: 'No se registró el cantón / sector de origen de la madera. Requerido por normativa EUDR.',
+      });
+    }
+
+    // 4. VERIFICADO — BF Calificados ≤ BF Netos (situación NORMAL, solo se documenta)
+    // Nota: es completamente normal que BF Cal < BF Netos por proceso de calificación
+    const verificado = bfNetos > 0 && bfCalVal > 0 && bfCalVal <= bfNetos;
+
+    // Solo hay "novedad real" si hay IRREAL, PROV_DESCONOCIDO o SIN_LUGAR
+    const tieneNovedad = novedades.length > 0;
+
     const registro = {
       id:               generarId(),
       numGuia,
       tipoGuia:         clasificarGuia(numGuia),
       proveedorCodigo:  provCodigo,
       proveedorNombre:  prov ? prov.nombre : provCodigo,
-      lugarProcedencia,
+      lugarProcedencia: lugarProcedencia || '—',
       fecha,
       volM3:            m3Val,
       volGuia:          bfNetos,
@@ -2222,8 +2285,10 @@
       bfCalificados:    bfCalVal,
       estBloques:       estBloq,
       desperdicio:      parseFloat(Math.max(0, bfNetos - bfCalVal).toFixed(2)),
-      yield:            bfNetos > 0 ? parseFloat(((bfCalVal/bfNetos)*100).toFixed(2)) : 0,
-      tieneNovedad:     bfNetos > 0 && bfCalVal > 0 && Math.abs(bfNetos - bfCalVal) > 0.01,
+      yield:            bfNetos > 0 ? parseFloat(((bfCalVal / bfNetos) * 100).toFixed(2)) : 0,
+      tieneNovedad,
+      verificado,       // true cuando BF Cal ≤ BF Netos (situación normal)
+      novedades,        // Array con todas las novedades reales detectadas
       calidad,
       observaciones,
       operador:         SESION.nombre,
@@ -2234,10 +2299,14 @@
     guardarStore();
     actualizarStats();
     limpiarFormulario();
-    const novMsg = registro.tieneNovedad
-      ? `\n\n⚠ Novedad registrada: BF Netos (${bfNetos}) difiere de BF Calificados (${bfCalVal}). Diferencia: ${Math.abs(bfNetos-bfCalVal).toFixed(2)} BF.`
-      : '';
-    alert(`✔ Registro #${registro.numGuia} guardado.${novMsg}`);
+
+    if (novedades.length > 0) {
+      const resumen = novedades.map(n => `${n.icono} ${n.titulo}:\n   ${n.detalle}`).join('\n\n');
+      alert(`✔ Viaje #${registro.numGuia} guardado.\n\n⚠ NOVEDADES REGISTRADAS (${novedades.length}):\n\n${resumen}`);
+    } else {
+      const verTxt = verificado ? ` Volumen verificado: ${bfNetos} BF Netos → ${bfCalVal} BF Calificados.` : '';
+      alert(`✔ Viaje #${registro.numGuia} guardado correctamente. Sin novedades.${verTxt}`);
+    }
   }
 
   function limpiarFormulario() {
@@ -2432,7 +2501,7 @@
       }
       parsearTextoPDF(texto);
     } catch (err) {
-      console.error('[BALSASUD PDF]', err);
+      if (typeof console !== 'undefined' && console.error) console.error('[BALSASUD PDF]', err);
       setPdfStatus('error', 'Error al leer el PDF. Verifica que no esté protegido con contraseña.');
     }
   }
@@ -2974,8 +3043,10 @@
       if (this.files[0]) { importarRespaldo(this.files[0]); this.value=''; }
     });
 
-    console.info('[BALSASUD] Sistema iniciado. Sesión:', SESION.nombre, '| Rol:', SESION.rol);
-    console.info('[BALSASUD] Proveedores cargados:', Object.keys(DB_PROVEEDORES).length);
+    if (typeof console !== 'undefined' && console.log) {
+      console.log('[BALSASUD] Sistema iniciado. Sesión:', SESION.nombre, '| Rol:', SESION.rol);
+      console.log('[BALSASUD] Proveedores cargados:', Object.keys(DB_PROVEEDORES).length);
+    }
   }
 
   // Bootstrap
